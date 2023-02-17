@@ -1474,6 +1474,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "image",
+ "png",
  "vulkano",
  "vulkano-shaders",
  "vulkano-win",
