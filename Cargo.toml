@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bytemuck = "1.13.0"
 image = "0.24.5"
 vulkano = "0.32"
 vulkano-shaders = "0.32"
