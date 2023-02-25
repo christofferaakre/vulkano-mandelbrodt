@@ -34,7 +34,7 @@ use vulkano_util::{
     renderer::DEFAULT_IMAGE_FORMAT,
     window::{VulkanoWindows, WindowDescriptor},
 };
-use winit::event::{ElementState, KeyboardInput, MouseScrollDelta, VirtualKeyCode};
+use winit::event::{ElementState, KeyboardInput, ModifiersState, MouseScrollDelta, VirtualKeyCode};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -105,7 +105,7 @@ fn main() {
         &WindowDescriptor {
             width: width as f32,
             height: height as f32,
-            title: "Mandelbrodt set".to_string(),
+            title: "Mandelbrodt".to_string(),
             present_mode: PresentMode::Fifo,
             ..Default::default()
         },
@@ -180,6 +180,7 @@ fn main() {
     let mut recreate_swapchain = false;
 
     let mut keys_pressed = HashSet::new();
+    let mut pressed_modifiers = Default::default();
 
     let mut previous_frame = Instant::now();
 
@@ -201,9 +202,12 @@ fn main() {
                     recreate_swapchain = true;
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
-                    let _keyboard_input =
-                        handle_keyboard_input(input, &mut keys_pressed, &mut state, dt_secs);
+                    let _keyboard_input = handle_keyboard_input(input, &mut keys_pressed);
                 }
+                WindowEvent::ModifiersChanged(modifiers_state) => {
+                    pressed_modifiers = modifiers_state;
+                }
+
                 WindowEvent::MouseWheel { delta, .. } => {
                     let change = match delta {
                         MouseScrollDelta::LineDelta(_x, y) => y,
@@ -217,12 +221,13 @@ fn main() {
                 let now = Instant::now();
                 let dt = now - previous_frame;
                 dt_secs = dt.as_secs_f32();
-                handle_held_keys(&mut keys_pressed, &mut state, dt_secs);
+                handle_held_keys(&keys_pressed, &pressed_modifiers, &mut state, dt_secs);
 
                 let fps = 1.0 / dt_secs;
-                renderer
-                    .window()
-                    .set_title(&format!("Mandelbrot | fps: {:.2}", fps));
+                renderer.window().set_title(&format!(
+                    "Mandelbrot | fps: {:.2}, scale: {:.2}, max iters: {}",
+                    fps, state.scale, state.max_iters
+                ));
 
                 previous_frame = now;
 
@@ -375,7 +380,12 @@ fn main() {
     }
 }
 
-fn handle_held_keys(keys_pressed: &mut HashSet<VirtualKeyCode>, state: &mut State, dt_secs: f32) {
+fn handle_held_keys(
+    keys_pressed: &HashSet<VirtualKeyCode>,
+    pressed_modifiers: &ModifiersState,
+    state: &mut State,
+    dt_secs: f32,
+) {
     if keys_pressed.contains(&VirtualKeyCode::A) {
         state.translation[0] -= dt_secs * PAN_SPEED / state.scale;
     }
@@ -388,13 +398,34 @@ fn handle_held_keys(keys_pressed: &mut HashSet<VirtualKeyCode>, state: &mut Stat
     if keys_pressed.contains(&VirtualKeyCode::S) {
         state.translation[1] += dt_secs * PAN_SPEED / state.scale;
     }
+
+    let max_iters_increase_amount = match pressed_modifiers.ctrl() {
+        true => 50,
+        false => 5,
+    };
+
+    if keys_pressed.contains(&VirtualKeyCode::Equals) {
+        if pressed_modifiers.alt() {
+            state.max_iters = (state.max_iters as f32 * 1.01) as u32;
+        } else {
+            state.max_iters += max_iters_increase_amount
+        }
+    }
+
+    if keys_pressed.contains(&VirtualKeyCode::Minus) {
+        if pressed_modifiers.alt() {
+            state.max_iters = (state.max_iters as f32 / 1.01) as u32;
+        } else {
+            if state.max_iters > max_iters_increase_amount {
+                state.max_iters -= max_iters_increase_amount
+            }
+        }
+    }
 }
 
 fn handle_keyboard_input(
     input: KeyboardInput,
     keys_pressed: &mut HashSet<VirtualKeyCode>,
-    state: &mut State,
-    dt_secs: f32,
 ) -> Option<VirtualKeyCode> {
     if let None = input.virtual_keycode {
         eprintln!("Input with no virtual keycode detected: {:?}", input);
