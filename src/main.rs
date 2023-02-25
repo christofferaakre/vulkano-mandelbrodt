@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{RenderPassBeginInfo, SubpassContents};
@@ -32,6 +34,7 @@ use vulkano_util::{
     renderer::DEFAULT_IMAGE_FORMAT,
     window::{VulkanoWindows, WindowDescriptor},
 };
+use winit::event::{ElementState, KeyboardInput, MouseScrollDelta, VirtualKeyCode};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -62,6 +65,18 @@ const VERTICES: [Vertex; 3] = [
         tex_coords: [2.0, 0.0],
     },
 ];
+
+const PAN_SPEED: f32 = 3.0;
+const ZOOM_SPEED: f32 = 0.3;
+const INTIIAL_SCALE: f32 = 1.0;
+const INITIAL_MAX_ITERS: u32 = 200;
+const INITIAL_TRANSLATION: [f32; 2] = [0.0; 2];
+
+pub struct State {
+    translation: [f32; 2],
+    scale: f32,
+    max_iters: u32,
+}
 
 fn main() {
     let context = VulkanoContext::new(Default::default());
@@ -164,6 +179,18 @@ fn main() {
 
     let mut recreate_swapchain = false;
 
+    let mut keys_pressed = HashSet::new();
+
+    let mut previous_frame = Instant::now();
+
+    let mut state = State {
+        translation: INITIAL_TRANSLATION,
+        scale: INTIIAL_SCALE,
+        max_iters: INITIAL_MAX_ITERS,
+    };
+
+    let mut dt_secs = 0.0;
+
     loop {
         event_loop.run_return(|event, _, control_flow| match event {
             Event::WindowEvent { event, .. } => match event {
@@ -173,9 +200,32 @@ fn main() {
                 WindowEvent::Resized(_) => {
                     recreate_swapchain = true;
                 }
+                WindowEvent::KeyboardInput { input, .. } => {
+                    let _keyboard_input =
+                        handle_keyboard_input(input, &mut keys_pressed, &mut state, dt_secs);
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let change = match delta {
+                        MouseScrollDelta::LineDelta(_x, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    };
+                    state.scale += (change * ZOOM_SPEED) * 1.0f32.max(0.25 * state.scale);
+                }
                 _ => {}
             },
             Event::RedrawEventsCleared => {
+                let now = Instant::now();
+                let dt = now - previous_frame;
+                dt_secs = dt.as_secs_f32();
+                handle_held_keys(&mut keys_pressed, &mut state, dt_secs);
+
+                let fps = 1.0 / dt_secs;
+                renderer
+                    .window()
+                    .set_title(&format!("Mandelbrot | fps: {:.2}", fps));
+
+                previous_frame = now;
+
                 let dimensions = renderer.window_size();
                 let width = dimensions[0];
                 let height = dimensions[1];
@@ -212,6 +262,13 @@ fn main() {
 
                 let img_dims = image_view.image().dimensions().width_height();
 
+                let push_constants = cs::ty::PushConstants {
+                    scale: state.scale,
+                    translation: state.translation,
+                    max_iters: state.max_iters,
+                    _dummy0: Default::default(),
+                };
+
                 compute_command_buffer_builder
                     .bind_pipeline_compute(compute_pipeline.clone())
                     .bind_descriptor_sets(
@@ -220,6 +277,7 @@ fn main() {
                         0,
                         set,
                     )
+                    .push_constants(compute_pipeline.layout().clone(), 0, push_constants)
                     .dispatch([img_dims[0] / 8, img_dims[1] / 8, 1])
                     .unwrap();
 
@@ -317,6 +375,42 @@ fn main() {
     }
 }
 
+fn handle_held_keys(keys_pressed: &mut HashSet<VirtualKeyCode>, state: &mut State, dt_secs: f32) {
+    if keys_pressed.contains(&VirtualKeyCode::A) {
+        state.translation[0] -= dt_secs * PAN_SPEED / state.scale;
+    }
+    if keys_pressed.contains(&VirtualKeyCode::D) {
+        state.translation[0] += dt_secs * PAN_SPEED / state.scale;
+    }
+    if keys_pressed.contains(&VirtualKeyCode::W) {
+        state.translation[1] -= dt_secs * PAN_SPEED / state.scale;
+    }
+    if keys_pressed.contains(&VirtualKeyCode::S) {
+        state.translation[1] += dt_secs * PAN_SPEED / state.scale;
+    }
+}
+
+fn handle_keyboard_input(
+    input: KeyboardInput,
+    keys_pressed: &mut HashSet<VirtualKeyCode>,
+    state: &mut State,
+    dt_secs: f32,
+) -> Option<VirtualKeyCode> {
+    if let None = input.virtual_keycode {
+        eprintln!("Input with no virtual keycode detected: {:?}", input);
+        return None;
+    }
+
+    let keycode = input.virtual_keycode.unwrap();
+
+    match input.state {
+        ElementState::Pressed => keys_pressed.insert(keycode),
+        ElementState::Released => keys_pressed.remove(&keycode),
+    };
+
+    input.virtual_keycode
+}
+
 mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
@@ -365,6 +459,13 @@ mod cs {
         layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
         layout(binding = 0, set = 0, rgba8) uniform writeonly image2D image;
 
+        layout(push_constant) uniform PushConstants {
+            float scale;
+            vec2 translation;
+            uint max_iters;
+
+        } push_constants;
+
         vec2 iterate(vec2 z, vec2 c) {
             return vec2(
                 z.x * z.x - z.y * z.y + c.x,
@@ -374,27 +475,32 @@ mod cs {
 
         void main() {
             vec2 dims = vec2(imageSize(image));
-            //float ar = dims.x / dims.y;
+            float ar = dims.x / dims.y;
             float x_norm = (gl_GlobalInvocationID.x / dims.x);
             float y_norm = (gl_GlobalInvocationID.y / dims.y);
 
-            float x0 = (x_norm * 4.0) - 2.0;
-            float y0 = (y_norm * 4.0) - 2.0;
+            float x0 = ar * (x_norm * 4.0 / push_constants.scale) - (2.0 / push_constants.scale) + push_constants.translation.x;
+            float y0 = (y_norm * 4.0 / push_constants.scale) - (2.0 / push_constants.scale) + push_constants.translation.y;
 
-            float i;
+            uint n;
 
             vec2 c = vec2(x0, y0);
             vec2 z = c;
-            for(i = 0.0; i < 1.0; i += 0.005) {
+            for(n = 0; n < push_constants.max_iters; n += 1) {
                 z = iterate(z, c);
                 if (length(z) > 8.0) {
                     break;
                 }
             }
 
+            float i = float(n) / push_constants.max_iters;
             vec4 pixel = vec4(i, i, i, 1.0);
             imageStore(image, ivec2(gl_GlobalInvocationID.xy), pixel);
         }
-        "
+        ",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
+            #[derive(Clone, Copy, Pod, Zeroable)]
+        }
     }
 }
