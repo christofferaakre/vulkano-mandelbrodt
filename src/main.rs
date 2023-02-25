@@ -43,6 +43,8 @@ use winit::{
 
 use bytemuck::{Pod, Zeroable};
 
+use indoc::printdoc;
+
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Pod, Zeroable)]
 pub struct Vertex {
@@ -192,191 +194,205 @@ fn main() {
 
     let mut dt_secs = 0.0;
 
+    print_help();
+
     loop {
-        event_loop.run_return(|event, _, control_flow| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    *control_flow = ControlFlow::Wait;
-                }
-                WindowEvent::Resized(_) => {
-                    recreate_swapchain = true;
-                }
-                WindowEvent::KeyboardInput { input, .. } => {
-                    let _keyboard_input = handle_keyboard_input(input, &mut keys_pressed);
-                }
-                WindowEvent::ModifiersChanged(modifiers_state) => {
-                    pressed_modifiers = modifiers_state;
-                }
+        let mut is_running = true;
+        event_loop.run_return(|event, _, control_flow| {
+            *control_flow = ControlFlow::Wait;
+            match event {
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested => {
+                        is_running = false;
+                    }
+                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                        renderer.resize();
+                        recreate_swapchain = true;
+                    }
+                    WindowEvent::KeyboardInput { input, .. } => {
+                        let keyboard_input = handle_keyboard_input(input, &mut keys_pressed);
+                        if keyboard_input == Some(VirtualKeyCode::Escape) {
+                            is_running = false;
+                        }
+                    }
+                    WindowEvent::ModifiersChanged(modifiers_state) => {
+                        pressed_modifiers = modifiers_state;
+                    }
 
-                WindowEvent::MouseWheel { delta, .. } => {
-                    let change = match delta {
-                        MouseScrollDelta::LineDelta(_x, y) => y,
-                        MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
-                    };
-                    state.scale += (change * ZOOM_SPEED) * 1.0f32.max(0.25 * state.scale);
-                }
-                _ => {}
-            },
-            Event::RedrawEventsCleared => {
-                let now = Instant::now();
-                let dt = now - previous_frame;
-                dt_secs = dt.as_secs_f32();
-                handle_held_keys(&keys_pressed, &pressed_modifiers, &mut state, dt_secs);
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let change = match delta {
+                            MouseScrollDelta::LineDelta(_x, y) => y,
+                            MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                        };
+                        state.scale += (change * ZOOM_SPEED) * 1.0f32.max(0.25 * state.scale);
+                    }
+                    _ => {}
+                },
+                Event::RedrawEventsCleared => {
+                    let now = Instant::now();
+                    let dt = now - previous_frame;
+                    dt_secs = dt.as_secs_f32();
+                    handle_held_keys(&keys_pressed, &pressed_modifiers, &mut state, dt_secs);
 
-                let fps = 1.0 / dt_secs;
-                renderer.window().set_title(&format!(
-                    "Mandelbrot | fps: {:.2}, scale: {:.2}, max iters: {}",
-                    fps, state.scale, state.max_iters
-                ));
+                    let fps = 1.0 / dt_secs;
+                    renderer.window().set_title(&format!(
+                        "Mandelbrot | fps: {:.2}, scale: {:.2}, max iters: {}",
+                        fps, state.scale, state.max_iters
+                    ));
 
-                previous_frame = now;
+                    previous_frame = now;
 
-                let dimensions = renderer.window_size();
-                let width = dimensions[0];
-                let height = dimensions[1];
+                    let dimensions = renderer.window_size();
+                    let width = dimensions[0];
+                    let height = dimensions[1];
 
-                if width == 0.0 || height == 0.0 {
-                    return;
-                }
-
-                let acquire_future = match renderer.acquire() {
-                    Ok(future) => future,
-                    Err(e) => {
-                        println!("{}", e);
+                    if width == 0.0 || height == 0.0 {
                         return;
                     }
-                };
 
-                let image_view = renderer.get_additional_image_view(render_target_id);
+                    let acquire_future = match renderer.acquire() {
+                        Ok(future) => future,
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            return;
+                        }
+                    };
 
-                let mut compute_command_buffer_builder = AutoCommandBufferBuilder::primary(
-                    &command_buffer_allocator,
-                    graphics_queue.queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit,
-                )
-                .unwrap();
+                    let image_view = renderer.get_additional_image_view(render_target_id);
 
-                let set_layout = compute_pipeline.layout().set_layouts().get(0).unwrap();
-
-                let set = PersistentDescriptorSet::new(
-                    &descriptor_set_allocator,
-                    set_layout.clone(),
-                    [WriteDescriptorSet::image_view(0, image_view.clone())],
-                )
-                .unwrap();
-
-                let img_dims = image_view.image().dimensions().width_height();
-
-                let push_constants = cs::ty::PushConstants {
-                    scale: state.scale,
-                    translation: state.translation,
-                    max_iters: state.max_iters,
-                    _dummy0: Default::default(),
-                };
-
-                compute_command_buffer_builder
-                    .bind_pipeline_compute(compute_pipeline.clone())
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Compute,
-                        compute_pipeline.layout().clone(),
-                        0,
-                        set,
+                    let mut compute_command_buffer_builder = AutoCommandBufferBuilder::primary(
+                        &command_buffer_allocator,
+                        graphics_queue.queue_family_index(),
+                        CommandBufferUsage::OneTimeSubmit,
                     )
-                    .push_constants(compute_pipeline.layout().clone(), 0, push_constants)
-                    .dispatch([img_dims[0] / 8, img_dims[1] / 8, 1])
                     .unwrap();
 
-                let compute_command_buffer = compute_command_buffer_builder.build().unwrap();
+                    let set_layout = compute_pipeline.layout().set_layouts().get(0).unwrap();
 
-                let compute_future = compute_command_buffer
-                    .execute(graphics_queue.clone())
-                    .unwrap()
-                    .then_signal_fence_and_flush()
-                    .unwrap()
-                    .join(acquire_future);
+                    let set = PersistentDescriptorSet::new(
+                        &descriptor_set_allocator,
+                        set_layout.clone(),
+                        [WriteDescriptorSet::image_view(0, image_view.clone())],
+                    )
+                    .unwrap();
 
-                let sampler = Sampler::new(
-                    device.clone(),
-                    SamplerCreateInfo {
-                        mag_filter: Filter::Linear,
-                        min_filter: Filter::Linear,
-                        mipmap_mode: SamplerMipmapMode::Linear,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+                    let img_dims = image_view.image().dimensions().width_height();
 
-                let set_layout = graphics_pipeline.layout().set_layouts().get(0).unwrap();
-                let set = PersistentDescriptorSet::new(
-                    &descriptor_set_allocator,
-                    set_layout.clone(),
-                    [WriteDescriptorSet::image_view_sampler(
-                        0,
-                        image_view.clone(),
-                        sampler.clone(),
-                    )],
-                )
-                .unwrap();
+                    let push_constants = cs::ty::PushConstants {
+                        scale: state.scale,
+                        translation: state.translation,
+                        max_iters: state.max_iters,
+                        _dummy0: Default::default(),
+                    };
 
-                let mut graphics_command_buffer_builder = AutoCommandBufferBuilder::primary(
-                    &command_buffer_allocator,
-                    graphics_queue.queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit,
-                )
-                .unwrap();
+                    compute_command_buffer_builder
+                        .bind_pipeline_compute(compute_pipeline.clone())
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Compute,
+                            compute_pipeline.layout().clone(),
+                            0,
+                            set,
+                        )
+                        .push_constants(compute_pipeline.layout().clone(), 0, push_constants)
+                        .dispatch([img_dims[0] / 8, img_dims[1] / 8, 1])
+                        .unwrap();
 
-                let target = renderer.swapchain_image_view();
+                    let compute_command_buffer = compute_command_buffer_builder.build().unwrap();
 
-                let framebuffer = Framebuffer::new(
-                    render_pass.clone(),
-                    FramebufferCreateInfo {
-                        attachments: vec![target],
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+                    let compute_future = compute_command_buffer
+                        .execute(graphics_queue.clone())
+                        .unwrap()
+                        .then_signal_fence_and_flush()
+                        .unwrap()
+                        .join(acquire_future);
 
-                let viewport = Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: renderer.window_size(),
-                    depth_range: 0.0..1.0,
-                };
-
-                graphics_command_buffer_builder
-                    .bind_pipeline_graphics(graphics_pipeline.clone())
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            render_pass: render_pass.clone(),
-                            clear_values: vec![Some([0.3, 0.3, 0.3, 1.0].into())],
-                            ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                    let sampler = Sampler::new(
+                        device.clone(),
+                        SamplerCreateInfo {
+                            mag_filter: Filter::Linear,
+                            min_filter: Filter::Linear,
+                            mipmap_mode: SamplerMipmapMode::Linear,
+                            ..Default::default()
                         },
-                        SubpassContents::Inline,
                     )
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        graphics_pipeline.layout().clone(),
-                        0,
-                        set,
-                    )
-                    .set_viewport(0, [viewport])
-                    .bind_vertex_buffers(0, vertex_buffer.clone())
-                    .draw(VERTICES.len() as u32, 1, 0, 0)
-                    .unwrap()
-                    .end_render_pass()
                     .unwrap();
 
-                let graphics_command_buffer = graphics_command_buffer_builder.build().unwrap();
+                    let set_layout = graphics_pipeline.layout().set_layouts().get(0).unwrap();
+                    let set = PersistentDescriptorSet::new(
+                        &descriptor_set_allocator,
+                        set_layout.clone(),
+                        [WriteDescriptorSet::image_view_sampler(
+                            0,
+                            image_view.clone(),
+                            sampler.clone(),
+                        )],
+                    )
+                    .unwrap();
 
-                let after_future = compute_future
-                    .then_execute(graphics_queue.clone(), graphics_command_buffer)
-                    .unwrap()
-                    .boxed();
+                    let mut graphics_command_buffer_builder = AutoCommandBufferBuilder::primary(
+                        &command_buffer_allocator,
+                        graphics_queue.queue_family_index(),
+                        CommandBufferUsage::OneTimeSubmit,
+                    )
+                    .unwrap();
 
-                renderer.present(after_future, true);
+                    let target = renderer.swapchain_image_view();
+
+                    let framebuffer = Framebuffer::new(
+                        render_pass.clone(),
+                        FramebufferCreateInfo {
+                            attachments: vec![target],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+
+                    let viewport = Viewport {
+                        origin: [0.0, 0.0],
+                        dimensions: renderer.window_size(),
+                        depth_range: 0.0..1.0,
+                    };
+
+                    graphics_command_buffer_builder
+                        .bind_pipeline_graphics(graphics_pipeline.clone())
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                render_pass: render_pass.clone(),
+                                clear_values: vec![Some([0.3, 0.3, 0.3, 1.0].into())],
+                                ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                            },
+                            SubpassContents::Inline,
+                        )
+                        .unwrap()
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            graphics_pipeline.layout().clone(),
+                            0,
+                            set,
+                        )
+                        .set_viewport(0, [viewport])
+                        .bind_vertex_buffers(0, vertex_buffer.clone())
+                        .draw(VERTICES.len() as u32, 1, 0, 0)
+                        .unwrap()
+                        .end_render_pass()
+                        .unwrap();
+
+                    let graphics_command_buffer = graphics_command_buffer_builder.build().unwrap();
+
+                    let after_future = compute_future
+                        .then_execute(graphics_queue.clone(), graphics_command_buffer)
+                        .unwrap()
+                        .boxed();
+
+                    renderer.present(after_future, true);
+                }
+                Event::MainEventsCleared => *control_flow = ControlFlow::Exit,
+                _ => {}
             }
-            _ => {}
         });
+        if !is_running {
+            break;
+        }
     }
 }
 
@@ -428,7 +444,6 @@ fn handle_keyboard_input(
     keys_pressed: &mut HashSet<VirtualKeyCode>,
 ) -> Option<VirtualKeyCode> {
     if let None = input.virtual_keycode {
-        eprintln!("Input with no virtual keycode detected: {:?}", input);
         return None;
     }
 
@@ -440,6 +455,20 @@ fn handle_keyboard_input(
     };
 
     input.virtual_keycode
+}
+
+fn print_help() {
+    printdoc!(
+    "
+    Welcome to my mandlebrodt set explorer! This application lets you explore
+    the mandelbrodt set interactively. Below is an explanation of commands:
+
+    - WASD: Pan camera
+    - Scroll: Zoom in/out
+    - Equals/minus: Increase/decrease max number of iterations (hold ctrl to increase/decrease faster)
+    - Escape: Exit
+    "
+    )
 }
 
 mod vs {
