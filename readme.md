@@ -1,1 +1,0 @@
-# vulkano-mandelbrodt
