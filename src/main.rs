@@ -225,6 +225,7 @@ fn main() {
                             MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                         };
                         state.scale += (change * ZOOM_SPEED) * 1.0f32.max(0.25 * state.scale);
+                        state.scale = state.scale.max(1.0);
                     }
                     _ => {}
                 },
